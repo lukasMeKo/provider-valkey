@@ -1,0 +1,9 @@
+apiVersion: meta.pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-valkey
+  annotations:
+    meta.crossplane.io/source: github.com/lukasMeko/provider-valkey
+    meta.crossplane.io/license: Apache-2.0
+    meta.crossplane.io/description: |
+      A Crossplane provider for managing Valkey ACL users.
