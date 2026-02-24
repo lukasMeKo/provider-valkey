@@ -4,6 +4,7 @@ package clients
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -20,6 +21,9 @@ const (
 	KeyUsername = xpv1.ResourceCredentialsSecretUserKey
 	KeyPassword = xpv1.ResourceCredentialsSecretPasswordKey
 )
+
+// ErrUserNotFound is returned when the ACL user does not exist.
+var ErrUserNotFound = errors.New("ACL user not found")
 
 // ACLUserInfo holds the parsed result of ACL GETUSER.
 type ACLUserInfo struct {
@@ -60,13 +64,13 @@ func NewClient(creds map[string][]byte, useTLS bool) (valkey.Client, error) {
 	return client, nil
 }
 
-// GetACLUser retrieves ACL information for a user. Returns nil if the user
-// does not exist.
+// GetACLUser retrieves ACL information for a user. Returns ErrUserNotFound
+// if the user does not exist.
 func GetACLUser(ctx context.Context, c valkey.Client, username string) (*ACLUserInfo, error) {
 	resp := c.Do(ctx, c.B().AclGetuser().Username(username).Build())
 	if err := resp.Error(); err != nil {
 		if isUserNotFound(err) {
-			return nil, nil
+			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("ACL GETUSER failed: %w", err)
 	}
@@ -135,6 +139,10 @@ func DeleteACLUser(ctx context.Context, c valkey.Client, username string) error 
 func isUserNotFound(err error) bool {
 	if err == nil {
 		return false
+	}
+	// Valkey returns a nil response when the user doesn't exist.
+	if valkey.IsValkeyNil(err) {
+		return true
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "doesn't exist") ||

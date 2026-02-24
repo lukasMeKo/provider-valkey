@@ -124,13 +124,11 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 
 	username := meta.GetExternalName(cr)
 	info, err := vkclient.GetACLUser(ctx, e.client, username)
+	if errors.Is(err, vkclient.ErrUserNotFound) {
+		return managed.ExternalObservation{ResourceExists: false}, nil
+	}
 	if err != nil {
 		return managed.ExternalObservation{}, fmt.Errorf("%s: %w", errObserve, err)
-	}
-
-	// user doesn't exist
-	if info == nil {
-		return managed.ExternalObservation{ResourceExists: false}, nil
 	}
 
 	// populate observed state
