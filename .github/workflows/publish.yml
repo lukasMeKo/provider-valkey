@@ -50,6 +50,11 @@ jobs:
           tags: |
             ${{ needs.config.outputs.runtime_image }}:${{ github.sha }}
             ${{ needs.config.outputs.runtime_image }}:latest
+          cache-from: type=registry,ref=${{ needs.config.outputs.runtime_image }}:latest
+          cache-to: type=inline
+
+      - name: Pull runtime image for xpkg build
+        run: docker pull ${{ needs.config.outputs.runtime_image }}:${{ github.sha }}
 
       - name: Install crossplane CLI
         run: |
