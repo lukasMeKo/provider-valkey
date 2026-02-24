@@ -61,12 +61,12 @@ jobs:
           crossplane xpkg build \
             --package-root=./package \
             --embed-runtime-image=${{ needs.config.outputs.runtime_image }}:${{ github.sha }} \
-            --output=provider-valkey.xpkg
+            --package-file=provider-valkey.xpkg
           crossplane xpkg push \
-            --package-files=provider-valkey.xpkg \
+            -f provider-valkey.xpkg \
             ${{ needs.config.outputs.xpkg_image }}:${{ github.sha }}
           crossplane xpkg push \
-            --package-files=provider-valkey.xpkg \
+            -f provider-valkey.xpkg \
             ${{ needs.config.outputs.xpkg_image }}:latest
 
   tag-release:
