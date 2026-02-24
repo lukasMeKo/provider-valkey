@@ -92,6 +92,17 @@ spec:
                     enum:
                     - Secret
                     type: string
+                  tls:
+                    description: TLS configures TLS for the Valkey connection.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled controls whether TLS is used for the
+                          connection.
+                        type: boolean
+                    required:
+                    - enabled
+                    type: object
                 required:
                 - source
                 type: object

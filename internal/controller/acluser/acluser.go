@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"sort"
 	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/valkey-io/valkey-go"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,13 +73,13 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	}
 
 	if err := c.usage.Track(ctx, cr); err != nil {
-		return nil, errors.Wrap(err, errTrackUsage)
+		return nil, fmt.Errorf("%s: %w", errTrackUsage, err)
 	}
 
 	// fetch ProviderConfig
 	pc := &v1alpha1.ProviderConfig{}
 	if err := c.kube.Get(ctx, types.NamespacedName{Name: cr.GetProviderConfigReference().Name}, pc); err != nil {
-		return nil, errors.Wrap(err, errGetPC)
+		return nil, fmt.Errorf("%s: %w", errGetPC, err)
 	}
 
 	// fetch credentials secret
@@ -90,16 +92,19 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		Namespace: ref.Namespace,
 		Name:      ref.Name,
 	}, secret); err != nil {
-		return nil, errors.Wrap(err, errGetSecret)
+		return nil, fmt.Errorf("%s: %w", errGetSecret, err)
 	}
 
-	client, err := vkclient.NewClient(ctx, secret.Data)
+	// resolve TLS setting
+	useTLS := pc.Spec.Credentials.TLS != nil && pc.Spec.Credentials.TLS.Enabled
+
+	vkClient, err := vkclient.NewClient(secret.Data, useTLS)
 	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
+		return nil, fmt.Errorf("%s: %w", errNewClient, err)
 	}
 
 	return &external{
-		client: client,
+		client: vkClient,
 		kube:   c.kube,
 		creds:  secret.Data,
 	}, nil
@@ -120,7 +125,7 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 	username := meta.GetExternalName(cr)
 	info, err := vkclient.GetACLUser(ctx, e.client, username)
 	if err != nil {
-		return managed.ExternalObservation{}, errors.Wrap(err, errObserve)
+		return managed.ExternalObservation{}, fmt.Errorf("%s: %w", errObserve, err)
 	}
 
 	// user doesn't exist
@@ -156,14 +161,13 @@ func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 	// generate random password
 	password, err := generatePassword()
 	if err != nil {
-		return managed.ExternalCreation{}, errors.Wrap(err, errGenPassword)
+		return managed.ExternalCreation{}, fmt.Errorf("%s: %w", errGenPassword, err)
 	}
 
-	// build rules: reset, on/off, password, user rules
 	rules := buildRules(cr.Spec.ForProvider, password)
 
 	if err := vkclient.SetACLUser(ctx, e.client, username, rules); err != nil {
-		return managed.ExternalCreation{}, errors.Wrap(err, errCreate)
+		return managed.ExternalCreation{}, fmt.Errorf("%s: %w", errCreate, err)
 	}
 
 	// publish connection details
@@ -190,12 +194,10 @@ func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	}
 
 	username := meta.GetExternalName(cr)
-
-	// rebuild rules without password (keep existing password)
 	rules := buildRulesWithoutPassword(cr.Spec.ForProvider)
 
 	if err := vkclient.SetACLUser(ctx, e.client, username, rules); err != nil {
-		return managed.ExternalUpdate{}, errors.Wrap(err, errUpdate)
+		return managed.ExternalUpdate{}, fmt.Errorf("%s: %w", errUpdate, err)
 	}
 
 	return managed.ExternalUpdate{}, nil
@@ -210,7 +212,7 @@ func (e *external) Delete(ctx context.Context, mg resource.Managed) (managed.Ext
 	username := meta.GetExternalName(cr)
 
 	if err := vkclient.DeleteACLUser(ctx, e.client, username); err != nil {
-		return managed.ExternalDelete{}, errors.Wrap(err, errDelete)
+		return managed.ExternalDelete{}, fmt.Errorf("%s: %w", errDelete, err)
 	}
 
 	return managed.ExternalDelete{}, nil
@@ -225,38 +227,29 @@ func (e *external) Disconnect(_ context.Context) error {
 func buildRules(p v1alpha1.ACLUserParameters, password string) []string {
 	rules := []string{"reset"}
 
-	// on/off
 	if p.Enabled != nil && !*p.Enabled {
 		rules = append(rules, "off")
 	} else {
 		rules = append(rules, "on")
 	}
 
-	// password
 	rules = append(rules, ">"+password)
-
-	// user-defined rules
 	rules = append(rules, p.Rules...)
 
 	return rules
 }
 
-// buildRulesWithoutPassword constructs rules for update (reset + state + user rules, no password change).
-// We need to preserve the existing password, so we reset keys/commands/channels but re-add the password
-// from the existing user by not including resetpass.
+// buildRulesWithoutPassword constructs rules for update without changing the password.
+// Uses resetkeys/resetchannels/nocommands to clear permission state while preserving passwords.
 func buildRulesWithoutPassword(p v1alpha1.ACLUserParameters) []string {
-	// Use resetkeys, resetchannels, and nocommands to clear permission state,
-	// but don't use "reset" which would also clear passwords.
 	rules := []string{"resetkeys", "resetchannels", "nocommands"}
 
-	// on/off
 	if p.Enabled != nil && !*p.Enabled {
 		rules = append(rules, "off")
 	} else {
 		rules = append(rules, "on")
 	}
 
-	// user-defined rules
 	rules = append(rules, p.Rules...)
 
 	return rules
@@ -271,52 +264,101 @@ func isUpToDate(p v1alpha1.ACLUserParameters, info *vkclient.ACLUserInfo) bool {
 		return false
 	}
 
-	// check rules by rebuilding what the user should look like and comparing
-	// with what's observed. This is a simplified comparison — we check that
-	// the desired rules are reflected in the observed state.
-	desiredRules := buildRulesWithoutPassword(p)
-	// Apply the rules to determine expected state and compare
-	// For now, use a simple heuristic: check key patterns, commands, channels
-	expectedKeys, expectedCmds, expectedChannels := parseExpectedState(desiredRules)
+	// extract desired keys, commands, and channels from user rules
+	desiredKeys, desiredCmds, desiredChannels := classifyRules(p.Rules)
 
-	if expectedKeys != "" && expectedKeys != info.Keys {
+	// compare key patterns
+	if !patternsMatch(desiredKeys, info.Keys) {
 		return false
 	}
-	if expectedCmds != "" && !commandsMatch(expectedCmds, info.Commands) {
+
+	// compare commands (set-based, order-independent)
+	if !commandsMatch(desiredCmds, info.Commands) {
 		return false
 	}
-	if expectedChannels != "" && expectedChannels != info.Channels {
+
+	// compare channel patterns
+	if !patternsMatch(desiredChannels, info.Channels) {
 		return false
 	}
 
 	return true
 }
 
-// parseExpectedState extracts expected keys, commands, and channels from rules.
-func parseExpectedState(rules []string) (keys, commands, channels string) {
-	var keyParts, cmdParts, chanParts []string
+// classifyRules separates user-defined rules into keys, commands, and channels.
+func classifyRules(rules []string) (keys, commands, channels []string) {
 	for _, r := range rules {
 		switch {
 		case strings.HasPrefix(r, "~") || strings.HasPrefix(r, "%"):
-			keyParts = append(keyParts, r)
+			keys = append(keys, r)
 		case r == "allkeys":
-			keyParts = append(keyParts, "~*")
+			keys = append(keys, "~*")
 		case strings.HasPrefix(r, "&"):
-			chanParts = append(chanParts, r)
+			channels = append(channels, r)
 		case r == "allchannels":
-			chanParts = append(chanParts, "&*")
+			channels = append(channels, "&*")
 		case strings.HasPrefix(r, "+") || strings.HasPrefix(r, "-") ||
 			r == "allcommands" || r == "nocommands":
-			cmdParts = append(cmdParts, r)
+			commands = append(commands, r)
 		}
 	}
-	return strings.Join(keyParts, " "), strings.Join(cmdParts, " "), strings.Join(chanParts, " ")
+	return keys, commands, channels
 }
 
-// commandsMatch does a normalized comparison of command strings.
-func commandsMatch(expected, observed string) bool {
-	// normalize by trimming and comparing
+// patternsMatch compares desired patterns against the observed string from Valkey.
+// An empty desired set means no patterns should exist (post-reset state).
+func patternsMatch(desired []string, observed string) bool {
+	expected := strings.Join(desired, " ")
 	return strings.TrimSpace(expected) == strings.TrimSpace(observed)
+}
+
+// commandsMatch compares desired command rules against observed commands.
+// Both sides are split into tokens and compared as sorted sets for order independence.
+func commandsMatch(desired []string, observed string) bool {
+	// normalize desired: expand aliases
+	var normalizedDesired []string
+	for _, c := range desired {
+		switch c {
+		case "allcommands":
+			normalizedDesired = append(normalizedDesired, "+@all")
+		case "nocommands":
+			normalizedDesired = append(normalizedDesired, "-@all")
+		default:
+			normalizedDesired = append(normalizedDesired, c)
+		}
+	}
+
+	// split observed into tokens
+	observedTokens := splitTokens(observed)
+
+	// empty desired means no commands (post-reset state = "-@all")
+	if len(normalizedDesired) == 0 {
+		return len(observedTokens) == 0 || (len(observedTokens) == 1 && observedTokens[0] == "-@all")
+	}
+
+	sort.Strings(normalizedDesired)
+	sort.Strings(observedTokens)
+
+	if len(normalizedDesired) != len(observedTokens) {
+		return false
+	}
+	for i := range normalizedDesired {
+		if normalizedDesired[i] != observedTokens[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// splitTokens splits a space-separated string into non-empty tokens.
+func splitTokens(s string) []string {
+	var tokens []string
+	for _, t := range strings.Fields(s) {
+		if t != "" {
+			tokens = append(tokens, t)
+		}
+	}
+	return tokens
 }
 
 func containsFlag(flags []string, flag string) bool {

@@ -7,7 +7,6 @@ tool sigs.k8s.io/controller-tools/cmd/controller-gen
 require (
 	github.com/alecthomas/kingpin/v2 v2.4.0
 	github.com/crossplane/crossplane-runtime/v2 v2.2.0
-	github.com/pkg/errors v0.9.1
 	github.com/valkey-io/valkey-go v1.0.72
 	k8s.io/api v0.35.1
 	k8s.io/apimachinery v0.35.1

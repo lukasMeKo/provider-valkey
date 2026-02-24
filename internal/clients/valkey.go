@@ -3,10 +3,11 @@ package clients
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
+	"strings"
 
-	"github.com/pkg/errors"
 	"github.com/valkey-io/valkey-go"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/v2/apis/common/v1"
@@ -29,11 +30,11 @@ type ACLUserInfo struct {
 }
 
 // NewClient creates a new Valkey client from connection secret data.
-func NewClient(ctx context.Context, creds map[string][]byte) (valkey.Client, error) {
+func NewClient(creds map[string][]byte, useTLS bool) (valkey.Client, error) {
 	endpoint := string(creds[KeyEndpoint])
 	port := string(creds[KeyPort])
 	if endpoint == "" {
-		return nil, errors.New("endpoint is required in credentials secret")
+		return nil, fmt.Errorf("endpoint is required in credentials secret")
 	}
 	if port == "" {
 		port = "6379"
@@ -48,10 +49,13 @@ func NewClient(ctx context.Context, creds map[string][]byte) (valkey.Client, err
 	if p := string(creds[KeyPassword]); p != "" {
 		opts.Password = p
 	}
+	if useTLS {
+		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
 	client, err := valkey.NewClient(opts)
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot create valkey client")
+		return nil, fmt.Errorf("cannot create valkey client: %w", err)
 	}
 	return client, nil
 }
@@ -61,31 +65,46 @@ func NewClient(ctx context.Context, creds map[string][]byte) (valkey.Client, err
 func GetACLUser(ctx context.Context, c valkey.Client, username string) (*ACLUserInfo, error) {
 	resp := c.Do(ctx, c.B().AclGetuser().Username(username).Build())
 	if err := resp.Error(); err != nil {
-		// Valkey returns an error when user doesn't exist
 		if isUserNotFound(err) {
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "ACL GETUSER failed")
+		return nil, fmt.Errorf("ACL GETUSER failed: %w", err)
 	}
 
 	m, err := resp.AsMap()
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot parse ACL GETUSER response as map")
+		return nil, fmt.Errorf("cannot parse ACL GETUSER response as map: %w", err)
 	}
 
 	info := &ACLUserInfo{}
 
 	if flags, ok := m["flags"]; ok {
-		info.Flags, _ = flags.AsStrSlice()
+		sl, err := flags.AsStrSlice()
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse flags: %w", err)
+		}
+		info.Flags = sl
 	}
 	if cmds, ok := m["commands"]; ok {
-		info.Commands, _ = cmds.ToString()
+		s, err := cmds.ToString()
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse commands: %w", err)
+		}
+		info.Commands = s
 	}
 	if keys, ok := m["keys"]; ok {
-		info.Keys, _ = keys.ToString()
+		s, err := keys.ToString()
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse keys: %w", err)
+		}
+		info.Keys = s
 	}
 	if channels, ok := m["channels"]; ok {
-		info.Channels, _ = channels.ToString()
+		s, err := channels.ToString()
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse channels: %w", err)
+		}
+		info.Channels = s
 	}
 
 	return info, nil
@@ -100,7 +119,7 @@ func SetACLUser(ctx context.Context, c valkey.Client, username string, rules []s
 
 	cmd := c.B().Arbitrary(args...).Build()
 	if err := c.Do(ctx, cmd).Error(); err != nil {
-		return errors.Wrap(err, fmt.Sprintf("ACL SETUSER %s failed", username))
+		return fmt.Errorf("ACL SETUSER %s failed: %w", username, err)
 	}
 	return nil
 }
@@ -108,7 +127,7 @@ func SetACLUser(ctx context.Context, c valkey.Client, username string, rules []s
 // DeleteACLUser removes an ACL user.
 func DeleteACLUser(ctx context.Context, c valkey.Client, username string) error {
 	if err := c.Do(ctx, c.B().AclDeluser().Username(username).Build()).Error(); err != nil {
-		return errors.Wrap(err, fmt.Sprintf("ACL DELUSER %s failed", username))
+		return fmt.Errorf("ACL DELUSER %s failed: %w", username, err)
 	}
 	return nil
 }
@@ -117,20 +136,8 @@ func isUserNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Valkey returns "ERR User ... doesn't exist" or similar
 	msg := err.Error()
-	return contains(msg, "doesn't exist") || contains(msg, "does not exist") || contains(msg, "not found")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "not found")
 }

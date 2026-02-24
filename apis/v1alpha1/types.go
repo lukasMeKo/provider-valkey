@@ -23,6 +23,17 @@ type ProviderCredentials struct {
 	// and optionally username and password.
 	// +optional
 	xpv1.CommonCredentialSelectors `json:",inline"`
+
+	// TLS configures TLS for the Valkey connection.
+	// +optional
+	TLS *TLSConfig `json:"tls,omitempty"`
+}
+
+// TLSConfig holds TLS settings for the Valkey connection.
+type TLSConfig struct {
+	// Enabled controls whether TLS is used for the connection.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled"`
 }
 
 // +kubebuilder:object:root=true

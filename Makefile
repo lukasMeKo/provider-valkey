@@ -1,4 +1,4 @@
-.PHONY: build generate crds fmt vet tidy clean
+.PHONY: build generate crds fmt vet tidy clean docker-build
 
 build: generate fmt vet
 	CGO_ENABLED=0 go build -o bin/provider ./cmd/provider/
@@ -21,5 +21,8 @@ tidy:
 
 clean:
 	rm -rf bin/ package/crds/*.yaml
+
+docker-build:
+	docker build -t provider-valkey .
 
 all: tidy generate crds build
