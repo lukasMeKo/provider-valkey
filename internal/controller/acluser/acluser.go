@@ -15,6 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/v2/apis/common/v1"
 	"github.com/crossplane/crossplane-runtime/v2/pkg/controller"
@@ -45,20 +47,51 @@ const (
 func Setup(mgr ctrl.Manager, o controller.Options) error {
 	name := managed.ControllerName(v1alpha1.ACLUserGroupKind)
 
+	inner := managed.NewReconciler(mgr,
+		resource.ManagedKind(v1alpha1.ACLUserGroupVersionKind),
+		managed.WithExternalConnector(&connector{
+			kube:  mgr.GetClient(),
+			usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
+		}),
+		managed.WithLogger(o.Logger.WithValues("controller", name)),
+		managed.WithPollInterval(o.PollInterval),
+		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
+	)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		For(&v1alpha1.ACLUser{}).
 		WithOptions(o.ForControllerRuntime()).
-		Complete(managed.NewReconciler(mgr,
-			resource.ManagedKind(v1alpha1.ACLUserGroupVersionKind),
-			managed.WithExternalConnector(&connector{
-				kube:  mgr.GetClient(),
-				usage: resource.NewProviderConfigUsageTracker(mgr.GetClient(), &v1alpha1.ProviderConfigUsage{}),
-			}),
-			managed.WithLogger(o.Logger.WithValues("controller", name)),
-			managed.WithPollInterval(o.PollInterval),
-			managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-		))
+		Complete(&foregroundDeletionReconciler{
+			inner:  inner,
+			client: mgr.GetClient(),
+		})
+}
+
+// foregroundDeletionReconciler strips the foregroundDeletion finalizer before
+// delegating to the managed reconciler. Crossplane-runtime delays external
+// deletion until len(finalizers) == 1, but the Kubernetes GC foregroundDeletion
+// finalizer creates a deadlock for namespace-scoped managed resources with no
+// dependents. Removing it is safe because ACLUser owns no child resources.
+type foregroundDeletionReconciler struct {
+	inner  reconcile.Reconciler
+	client client.Client
+}
+
+func (r *foregroundDeletionReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+	cr := &v1alpha1.ACLUser{}
+	if err := r.client.Get(ctx, req.NamespacedName, cr); err != nil {
+		return reconcile.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Strip foregroundDeletion so the managed reconciler's delete path proceeds.
+	if cr.DeletionTimestamp != nil && controllerutil.RemoveFinalizer(cr, "foregroundDeletion") {
+		if err := r.client.Update(ctx, cr); err != nil {
+			return reconcile.Result{}, fmt.Errorf("cannot remove foregroundDeletion finalizer: %w", err)
+		}
+	}
+
+	return r.inner.Reconcile(ctx, req)
 }
 
 type connector struct {
