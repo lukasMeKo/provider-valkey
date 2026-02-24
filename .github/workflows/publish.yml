@@ -1,0 +1,80 @@
+name: publish
+
+on:
+  push:
+    branches:
+      - main
+  release:
+    types:
+      - created
+
+permissions:
+  packages: write
+
+env:
+  RUNTIME_IMAGE: ghcr.io/${{ github.repository_owner }}/provider-valkey-runtime
+  XPKG_IMAGE: ghcr.io/${{ github.repository_owner }}/provider-valkey
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.RUNTIME_IMAGE }}:${{ github.sha }}
+            ${{ env.RUNTIME_IMAGE }}:latest
+
+      - name: Install crossplane CLI
+        run: |
+          curl -sL https://raw.githubusercontent.com/crossplane/crossplane/master/install.sh | sh
+          sudo mv crossplane /usr/local/bin/crossplane
+
+      - name: Build and push xpkg
+        run: |
+          crossplane xpkg build \
+            --package-root=./package \
+            --embed-runtime-image=${{ env.RUNTIME_IMAGE }}:${{ github.sha }} \
+            --output=provider-valkey.xpkg
+          crossplane xpkg push \
+            --package-files=provider-valkey.xpkg \
+            ${{ env.XPKG_IMAGE }}:${{ github.sha }}
+          crossplane xpkg push \
+            --package-files=provider-valkey.xpkg \
+            ${{ env.XPKG_IMAGE }}:latest
+
+  tag-release:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: ${{ github.event_name == 'release' }}
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.4
+
+      - name: Tag images with release version
+        run: |
+          crane tag ${{ env.RUNTIME_IMAGE }}:${{ github.sha }} ${{ github.ref_name }}
+          crane tag ${{ env.XPKG_IMAGE }}:${{ github.sha }} ${{ github.ref_name }}
