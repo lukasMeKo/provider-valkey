@@ -4,6 +4,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/v2/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/v2/pkg/resource"
 )
 
 // ProviderConfigSpec defines the desired state of a ProviderConfig.
@@ -125,4 +126,13 @@ type ProviderConfigUsageList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ProviderConfigUsage `json:"items"`
+}
+
+// GetItems returns the list of ProviderConfigUsages as resource.ProviderConfigUsage interfaces.
+func (l *ProviderConfigUsageList) GetItems() []resource.ProviderConfigUsage {
+	items := make([]resource.ProviderConfigUsage, len(l.Items))
+	for i := range l.Items {
+		items[i] = &l.Items[i]
+	}
+	return items
 }
