@@ -16,7 +16,7 @@ spec:
     listKind: ACLUserList
     plural: aclusers
     singular: acluser
-  scope: Cluster
+  scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.conditions[?(@.type=='Ready')].status
